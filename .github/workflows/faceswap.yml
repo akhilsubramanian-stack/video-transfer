@@ -1,0 +1,84 @@
+name: Face swap video
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: "Path to the source video in the repo"
+        default: "inputs/source.mp4"
+      face:
+        description: "Path to the reference photo in the repo"
+        default: "inputs/face.jpg"
+      all_faces:
+        description: "Swap every face in frame (true/false)"
+        default: "false"
+      publish_release:
+        description: "Also attach the result to a GitHub release (true/false)"
+        default: "true"
+
+permissions:
+  contents: write
+
+jobs:
+  swap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install ffmpeg and build tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q ffmpeg build-essential
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip wheel
+          pip install -r requirements.txt
+
+      - name: Download swapper model
+        env:
+          MODEL_URL: ${{ vars.INSWAPPER_URL || 'https://huggingface.co/ezioruan/inswapper_128.onnx/resolve/main/inswapper_128.onnx' }}
+        run: |
+          mkdir -p models
+          curl -L --fail --retry 3 -o models/inswapper_128.onnx "$MODEL_URL"
+          ls -la models
+
+      - name: Run face swap
+        run: |
+          ARGS=""
+          if [ "${{ github.event.inputs.all_faces }}" = "true" ]; then ARGS="--all-faces"; fi
+          python face_swap.py \
+            --source "${{ github.event.inputs.source }}" \
+            --face "${{ github.event.inputs.face }}" \
+            --out output/result.mp4 $ARGS
+
+      - name: Make preview contact sheet
+        run: |
+          mkdir -p output/frames
+          ffmpeg -v error -i output/result.mp4 -vf "fps=1,scale=240:-1" output/frames/f_%03d.jpg
+          n=$(ls output/frames | wc -l); rows=$(( (n+5)/6 ))
+          ffmpeg -v error -i output/frames/f_%03d.jpg -filter_complex "tile=6x${rows}" output/preview.jpg
+          rm -rf output/frames
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: faceswap-result
+          path: |
+            output/result.mp4
+            output/preview.jpg
+
+      - name: Publish release
+        if: ${{ github.event.inputs.publish_release == 'true' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: swap-${{ github.run_number }}
+          name: Face swap run ${{ github.run_number }}
+          files: |
+            output/result.mp4
+            output/preview.jpg
